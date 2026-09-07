@@ -46,7 +46,7 @@ MINIMUM_CONFLUENCE_SCORE = 72
 GEMINI_MIN_REQUEST_INTERVAL = 3
 GEMINI_TOKEN_LIMIT_PER_MINUTE = 1000000  # Increased to prevent false limits
 GEMINI_ESTIMATED_RESPONSE_TOKENS = 2000
-GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-1.5-pro']
+GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
@@ -2085,7 +2085,7 @@ def is_gpt_rate_limited():
     return retry_until is not None and datetime.now() < retry_until
 
 def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None):
-    api_key = get_secret("GEMINI_API_KEY", "")
+    api_key = get_secret("GEMINI_API_KEY", "").strip()
     if not api_key:
         print("❌ GEMINI_API_KEY is missing from st.secrets!")
         return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
@@ -2123,6 +2123,7 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 
     headers = {"Content-Type": "application/json"}
 
+    request_started = False
     for model in GEMINI_MODELS:
         try:
             # Rate limit checks
@@ -2132,7 +2133,7 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
                         "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT"}
 
             time_since_last = (datetime.now() - st.session_state.last_gpt_request_time).total_seconds() if st.session_state.last_gpt_request_time else None
-            if time_since_last is not None and time_since_last < GEMINI_MIN_REQUEST_INTERVAL:
+            if not request_started and time_since_last is not None and time_since_last < GEMINI_MIN_REQUEST_INTERVAL:
                 wait_time = int(GEMINI_MIN_REQUEST_INTERVAL - time_since_last)
                 st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
@@ -2159,20 +2160,23 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 
             res = requests.post(url, headers=headers, json=payload, timeout=120)
             st.session_state.last_gpt_request_time = datetime.now()
+            request_started = True
 
             # If responseMimeType fails, try WITHOUT it
-            if res.status_code == 400 and "responseMimeType" in res.text:
+            if res.status_code == 400 and "responsemimetype" in res.text.lower():
                 print(f"⚠️ responseMimeType not supported, retrying without it...")
                 payload["generationConfig"].pop("responseMimeType", None)
                 res = requests.post(url, headers=headers, json=payload, timeout=120)
 
             if res.status_code == 429:
                 retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
-                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
                 print(f"⏳ 429 Rate limit. Retry after {retry_after}s")
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "RATE_LIMIT", "model_used": model,
-                        "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429"}
+                if model == GEMINI_MODELS[-1]:
+                    st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
+                    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                            "rejection_reason": "RATE_LIMIT", "model_used": model,
+                            "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429"}
+                continue
 
             if res.status_code == 404:
                 print(f"❌ Model {model} returned 404. Trying next model...")
@@ -2587,9 +2591,18 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         # 🚨 STRICT FALLBACK TRIGGER: Only fallback if API completely failed
         if analysis.get('api_status') not in ['SUCCESS', 'SUCCESS_EXTRACTED']:
             gemini_failure = analysis.get('rejection_reason', 'Unknown API Error')
+            gemini_status = analysis.get('api_status', 'UNKNOWN')
+            gemini_model = analysis.get('model_used', 'None')
+            gemini_tokens = {
+                key: analysis.get(key, 0)
+                for key in ('total_tokens', 'prompt_tokens', 'completion_tokens')
+            }
             analysis = build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             analysis = normalize_analysis_signals(analysis)
             analysis['gemini_failure'] = gemini_failure
+            analysis['gemini_api_status'] = gemini_status
+            analysis['gemini_model'] = gemini_model
+            analysis.update(gemini_tokens)
             analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
             
         # 🚨 FORCE BUY/SELL (No WAIT allowed from AI)
@@ -2707,6 +2720,12 @@ with tab1:
                         
                         status_color = "green" if api_status in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK'] else "red"
                         st.markdown(f"**🤖 AI Model:** `{model_used}` | **🔋 Tokens Used:** `{total_tokens}` (Prompt: {prompt_tokens}, Completion: {completion_tokens}) | **📡 Status:** <span style='color:{status_color}; font-weight:bold;'>{api_status}</span>", unsafe_allow_html=True)
+
+                        if api_status == 'FALLBACK' and result.get('gemini_failure'):
+                            st.warning(
+                                f"Gemini unavailable ({result.get('gemini_api_status', 'UNKNOWN')}): "
+                                f"{result['gemini_failure']}"
+                            )
                         
                         if api_status not in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK']:
                             with st.expander("🐛 Debug AI Response (Why it failed)"):
