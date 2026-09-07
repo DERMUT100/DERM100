@@ -43,10 +43,11 @@ TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "")
 SYMBOLS = ['XAUUSD', 'EURUSD', 'BTCUSD', 'US30']
 YFINANCE_MAP = {'XAUUSD': 'GC=F', 'EURUSD': 'EURUSD=X', 'BTCUSD': 'BTC-USD', 'US30': '^DJI', 'DXY': 'DX-Y.NYB'}
 MINIMUM_CONFLUENCE_SCORE = 72
-GEMINI_MIN_REQUEST_INTERVAL = 3
-GEMINI_TOKEN_LIMIT_PER_MINUTE = 1000000  # Increased to prevent false limits
-GEMINI_ESTIMATED_RESPONSE_TOKENS = 2000
-GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
+GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+GROQ_MIN_REQUEST_INTERVAL = 3
+GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
+GROQ_ESTIMATED_RESPONSE_TOKENS = 2000
+GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'llama-3.3-70b-versatile']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
@@ -59,11 +60,11 @@ if 'signal_ledger' not in st.session_state: st.session_state.signal_ledger = []
 if 'learning_stats' not in st.session_state: st.session_state.learning_stats = {}
 if 'market_state' not in st.session_state: st.session_state.market_state = 'coiling'
 if 'state_history' not in st.session_state: st.session_state.state_history = []
-if 'gpt_tokens_used' not in st.session_state: st.session_state.gpt_tokens_used = 0
-if 'gpt_token_window_start' not in st.session_state: st.session_state.gpt_token_window_start = datetime.now()
-if 'last_gpt_request_time' not in st.session_state: st.session_state.last_gpt_request_time = None
-if 'gpt_rate_limit_until' not in st.session_state: st.session_state.gpt_rate_limit_until = None
-if 'gpt_rate_limit_reason' not in st.session_state: st.session_state.gpt_rate_limit_reason = ''
+if 'groq_tokens_used' not in st.session_state: st.session_state.groq_tokens_used = 0
+if 'groq_token_window_start' not in st.session_state: st.session_state.groq_token_window_start = datetime.now()
+if 'last_groq_request_time' not in st.session_state: st.session_state.last_groq_request_time = None
+if 'groq_rate_limit_until' not in st.session_state: st.session_state.groq_rate_limit_until = None
+if 'groq_rate_limit_reason' not in st.session_state: st.session_state.groq_rate_limit_reason = ''
 if 'cached_analysis' not in st.session_state: st.session_state.cached_analysis = {}
 
 def add_notification(note_type, message, symbol=None, signal=None, score=None):
@@ -2061,36 +2062,36 @@ def estimate_tokens_for_text(text):
 
 def estimate_analysis_tokens(system_prompt, user_content):
     prompt_text = system_prompt + ' ' + ' '.join([item.get('text', '') for item in user_content if isinstance(item, dict)])
-    return estimate_tokens_for_text(prompt_text) + GEMINI_ESTIMATED_RESPONSE_TOKENS
+    return estimate_tokens_for_text(prompt_text) + GROQ_ESTIMATED_RESPONSE_TOKENS
 
-def reserve_gpt_tokens(estimated_tokens):
+def reserve_groq_tokens(estimated_tokens):
     now = datetime.now()
-    window_start = st.session_state.gpt_token_window_start
+    window_start = st.session_state.groq_token_window_start
     if (now - window_start).total_seconds() >= 60:
-        st.session_state.gpt_token_window_start = now
-        st.session_state.gpt_tokens_used = 0
+        st.session_state.groq_token_window_start = now
+        st.session_state.groq_tokens_used = 0
     if estimated_tokens is None:
         estimated_tokens = 0
-    if st.session_state.gpt_tokens_used + estimated_tokens > GEMINI_TOKEN_LIMIT_PER_MINUTE:
-        next_reset = st.session_state.gpt_token_window_start + timedelta(minutes=1)
-        st.session_state.gpt_rate_limit_until = next_reset
-        st.session_state.gpt_rate_limit_reason = f"Token budget exceeded: {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
+    if st.session_state.groq_tokens_used + estimated_tokens > GROQ_TOKEN_LIMIT_PER_MINUTE:
+        next_reset = st.session_state.groq_token_window_start + timedelta(minutes=1)
+        st.session_state.groq_rate_limit_until = next_reset
+        st.session_state.groq_rate_limit_reason = f"Token budget exceeded: {st.session_state.groq_tokens_used}/{GROQ_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
         return False
-    st.session_state.gpt_rate_limit_reason = ''
+    st.session_state.groq_rate_limit_reason = ''
     # Don't add estimated tokens here, we will add ACTUAL tokens after the API call succeeds
     return True
 
-def is_gpt_rate_limited():
-    retry_until = st.session_state.get('gpt_rate_limit_until')
+def is_groq_rate_limited():
+    retry_until = st.session_state.get('groq_rate_limit_until')
     return retry_until is not None and datetime.now() < retry_until
 
-def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None):
-    api_key = get_secret("GEMINI_API_KEY", "").strip()
+def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None, image_mime_type='image/png'):
+    api_key = get_secret("GROQ_API_KEY", "").strip()
     if not api_key:
-        print("❌ GEMINI_API_KEY is missing from st.secrets!")
+        print("❌ GROQ_API_KEY is missing from st.secrets!")
         return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                "rejection_reason": "Missing Gemini API Key.",
-                "model_used": "Gemini unavailable", "estimated_tokens": 0,
+                "rejection_reason": "Missing Groq API Key.",
+                "model_used": "Groq unavailable", "estimated_tokens": 0,
                 "api_status": "MISSING_KEY"}
 
     if estimated_tokens is None:
@@ -2105,85 +2106,71 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
             user_text += item + "\n"
 
     # Build parts
-    parts = [{"text": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_text}"}]
+    parts = [{"type": "text", "text": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_text}"}]
 
     # Add image if provided (but compress to save tokens)
     if image_b64:
         # Only add image if it's under 500KB base64 (roughly 375KB original)
         if len(image_b64) < 500000:
             parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": image_b64
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_mime_type};base64,{image_b64}"
                 }
             })
             print(f"📸 Image attached ({len(image_b64)} chars base64)")
         else:
             print(f"⚠️ Image too large ({len(image_b64)} chars), skipping to save tokens")
 
-    headers = {"Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     request_started = False
     model_errors = []
-    for model in GEMINI_MODELS:
+    for model in GROQ_MODELS:
         try:
             # Rate limit checks
-            if is_gpt_rate_limited():
+            if is_groq_rate_limited():
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": "RATE_LIMIT", "model_used": model,
                         "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT"}
 
-            time_since_last = (datetime.now() - st.session_state.last_gpt_request_time).total_seconds() if st.session_state.last_gpt_request_time else None
-            if not request_started and time_since_last is not None and time_since_last < GEMINI_MIN_REQUEST_INTERVAL:
-                wait_time = int(GEMINI_MIN_REQUEST_INTERVAL - time_since_last)
-                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
+            time_since_last = (datetime.now() - st.session_state.last_groq_request_time).total_seconds() if st.session_state.last_groq_request_time else None
+            if not request_started and time_since_last is not None and time_since_last < GROQ_MIN_REQUEST_INTERVAL:
+                wait_time = int(GROQ_MIN_REQUEST_INTERVAL - time_since_last)
+                st.session_state.groq_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": "RATE_LIMIT", "model_used": model,
                         "estimated_tokens": estimated_tokens, "api_status": "SPACING_LIMIT"}
 
-            if not reserve_gpt_tokens(estimated_tokens):
+            if not reserve_groq_tokens(estimated_tokens):
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": "RATE_LIMIT", "model_used": model,
                         "estimated_tokens": estimated_tokens, "api_status": "TOKEN_BUDGET"}
 
-            # ── ATTEMPT 1: Native API WITH responseMimeType ──
             payload = {
-                "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {
-                    "temperature": 0.2,
-                    "maxOutputTokens": max_tokens,
-                    "responseMimeType": "application/json"
-                }
+                "model": model,
+                "messages": [{"role": "user", "content": parts}],
+                "temperature": 0.2,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"}
             }
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            print(f"🚀 Calling {model} via native API (with responseMimeType)...")
+            print(f"🚀 Calling {model} via Groq Chat Completions API...")
 
-            res = requests.post(url, headers=headers, json=payload, timeout=120)
-            st.session_state.last_gpt_request_time = datetime.now()
+            res = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=120)
+            st.session_state.last_groq_request_time = datetime.now()
             request_started = True
-
-            # If responseMimeType fails, try WITHOUT it
-            if res.status_code == 400 and "responsemimetype" in res.text.lower():
-                print(f"⚠️ responseMimeType not supported, retrying without it...")
-                payload["generationConfig"].pop("responseMimeType", None)
-                res = requests.post(url, headers=headers, json=payload, timeout=120)
 
             if res.status_code == 429:
                 retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
                 error_text = res.text[:500]
                 print(f"⏳ 429 Rate limit. Retry after {retry_after}s")
                 model_errors.append(f"{model}: HTTP 429 {error_text}")
-                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
+                st.session_state.groq_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                     "rejection_reason": f"RATE_LIMIT: {error_text}", "model_used": model,
                     "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429",
                     "raw_output": error_text}
-
-            if res.status_code == 404:
-                print(f"❌ Model {model} returned 404. Trying next model...")
-                model_errors.append(f"{model}: HTTP 404 {res.text[:300]}")
-                continue
 
             if res.status_code != 200:
                 error_text = res.text[:500]
@@ -2195,26 +2182,24 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
             res_data = res.json()
 
             # Extract token usage
-            usage = res_data.get("usageMetadata", {})
-            prompt_tokens = usage.get("promptTokenCount", 0)
-            completion_tokens = usage.get("candidatesTokenCount", 0)
-            total_tokens = usage.get("totalTokenCount", 0)
+            usage = res_data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
 
-            candidates = res_data.get("candidates", [])
-            if not candidates:
-                print(f"❌ No candidates in response: {str(res_data)[:300]}")
+            choices = res_data.get("choices", [])
+            if not choices:
+                print(f"❌ No choices in response: {str(res_data)[:300]}")
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "No candidates returned",
+                        "rejection_reason": "No choices returned",
                         "model_used": model, "api_status": "NO_CANDIDATES",
                         "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens}
 
-            response_parts = candidates[0].get("content", {}).get("parts", [])
-            content = "\n".join(
-                part.get("text", "")
-                for part in response_parts
-                if isinstance(part, dict) and part.get("text")
-            ).strip()
+            content = choices[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+            content = str(content).strip()
             print(f"✅ Got response from {model} | Tokens: {total_tokens}")
 
             # Clean markdown
@@ -2255,9 +2240,9 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
             result['prompt_tokens'] = prompt_tokens
             result['completion_tokens'] = completion_tokens
             result['api_status'] = 'SUCCESS'
-            st.session_state.gpt_tokens_used += total_tokens
-            st.session_state.gpt_rate_limit_until = None
-            st.session_state.gpt_rate_limit_reason = ''
+            st.session_state.groq_tokens_used += total_tokens
+            st.session_state.groq_rate_limit_until = None
+            st.session_state.groq_rate_limit_reason = ''
             return result
 
         except requests.exceptions.Timeout:
@@ -2267,14 +2252,14 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
         except Exception as e:
             print(f"❌ Exception calling {model}: {str(e)}")
             model_errors.append(f"{model}: {str(e)}")
-            if model == GEMINI_MODELS[-1]:
+            if model == GROQ_MODELS[-1]:
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": f"Error: {str(e)}", "model_used": "None",
                         "api_status": "EXCEPTION", "estimated_tokens": estimated_tokens}
             continue
 
     return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-            "rejection_reason": "Error: all Gemini models failed. " + " | ".join(model_errors[-3:]),
+            "rejection_reason": "Error: all Groq models failed. " + " | ".join(model_errors[-3:]),
             "model_used": "None", "api_status": "ALL_MODELS_FAILED",
             "estimated_tokens": estimated_tokens,
             "raw_output": "\n".join(model_errors[-3:])}
@@ -2282,7 +2267,7 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 def build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=None, phase_context=None, live_price=None, htf_context=None, picture=None, firm=None, firm_notes=None, learning=None, historical_context=None):
     if not st.session_state.get("_upgrade_fallback_warned"):
         try:
-            add_notification("warning", "Gemini AI is unavailable (missing API key or rate-limited). Signals are coming from the Python fallback model. Verify GEMINI_API_KEY in Streamlit Secrets for full-quality institutional analysis.")
+            add_notification("warning", "Groq AI is unavailable (missing API key or rate-limited). Signals are coming from the Python fallback model. Verify GROQ_API_KEY in Streamlit Secrets for full-quality institutional analysis.")
         except Exception:
             pass
         st.session_state._upgrade_fallback_warned = True
@@ -2478,7 +2463,7 @@ OUTPUT STRICT JSON ONLY (NO MARKDOWN, NO CODE FENCES):
 "rejection_reason": ""
 }}"""
 
-def analyze_symbol_premium(symbol, all_data, image_b64=None):
+def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='image/png'):
     try:
         data = all_data.get(symbol, {})
         m10 = data.get('M10', pd.DataFrame())
@@ -2587,7 +2572,11 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         estimated_tokens = estimate_analysis_tokens(build_market_analysis_prompt(), user_content)
         
         # 🚀 CALL AI FIRST
-        analysis = call_gpt(build_market_analysis_prompt(), user_content, max_tokens=4000, estimated_tokens=estimated_tokens, image_b64=image_b64)
+        analysis = call_groq(
+            build_market_analysis_prompt(), user_content,
+            max_tokens=4000, estimated_tokens=estimated_tokens,
+            image_b64=image_b64, image_mime_type=image_mime_type
+        )
         
         _post_ai_snapshot = get_live_market_snapshot(symbol, YFINANCE_MAP.get(symbol, symbol), fallback_df=m10)
         if _post_ai_snapshot.get("price"):
@@ -2605,22 +2594,22 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         
         # 🚨 STRICT FALLBACK TRIGGER: Only fallback if API completely failed
         if analysis.get('api_status') not in ['SUCCESS', 'SUCCESS_EXTRACTED']:
-            gemini_failure = analysis.get('rejection_reason', 'Unknown API Error')
-            gemini_status = analysis.get('api_status', 'UNKNOWN')
-            gemini_model = analysis.get('model_used', 'None')
-            gemini_raw_output = analysis.get('raw_output', '')
-            gemini_tokens = {
+            groq_failure = analysis.get('rejection_reason', 'Unknown API Error')
+            groq_status = analysis.get('api_status', 'UNKNOWN')
+            groq_model = analysis.get('model_used', 'None')
+            groq_raw_output = analysis.get('raw_output', '')
+            groq_tokens = {
                 key: analysis.get(key, 0)
                 for key in ('total_tokens', 'prompt_tokens', 'completion_tokens')
             }
             analysis = build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
             analysis = normalize_analysis_signals(analysis)
-            analysis['gemini_failure'] = gemini_failure
-            analysis['gemini_api_status'] = gemini_status
-            analysis['gemini_model'] = gemini_model
-            analysis.update(gemini_tokens)
-            if gemini_raw_output:
-                analysis['gemini_raw_output'] = gemini_raw_output
+            analysis['groq_failure'] = groq_failure
+            analysis['groq_api_status'] = groq_status
+            analysis['groq_model'] = groq_model
+            analysis.update(groq_tokens)
+            if groq_raw_output:
+                analysis['groq_raw_output'] = groq_raw_output
             analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
             
         # 🚨 FORCE BUY/SELL (No WAIT allowed from AI)
@@ -2708,13 +2697,15 @@ with tab1:
     uploaded_file = st.file_uploader("📸 Attach Market Chart Screenshot (Optional - AI will analyze price action)", type=["png", "jpg", "jpeg"])
     
     image_b64 = None
+    image_mime_type = 'image/png'
     if uploaded_file is not None:
         image_b64 = base64.b64encode(uploaded_file.read()).decode("utf-8")
+        image_mime_type = uploaded_file.type or image_mime_type
         st.image(uploaded_file, caption="Uploaded Chart Snapshot", width=400)
 
     if st.button("🧠 Analyse Market Now", type="primary"):
-        if not get_secret("GEMINI_API_KEY"):
-            st.error("⚠️ Please set your GEMINI_API_KEY in Streamlit Secrets.")
+        if not get_secret("GROQ_API_KEY"):
+            st.error("⚠️ Please set your GROQ_API_KEY in Streamlit Secrets.")
         else:
             with st.spinner("Fetching market data and running institutional analysis..."):
                 all_data = fetch_all_data()
@@ -2722,7 +2713,7 @@ with tab1:
                 
                 for symbol in selected_symbols:
                     st.info(f"Analysing {symbol}...")
-                    result = analyze_symbol_premium(symbol, all_data, image_b64=image_b64)
+                    result = analyze_symbol_premium(symbol, all_data, image_b64=image_b64, image_mime_type=image_mime_type)
                     
                     if 'error' in result:
                         st.error(f"❌ {symbol}: {result['error']}")
@@ -2739,10 +2730,10 @@ with tab1:
                         status_color = "green" if api_status in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK'] else "red"
                         st.markdown(f"**🤖 AI Model:** `{model_used}` | **🔋 Tokens Used:** `{total_tokens}` (Prompt: {prompt_tokens}, Completion: {completion_tokens}) | **📡 Status:** <span style='color:{status_color}; font-weight:bold;'>{api_status}</span>", unsafe_allow_html=True)
 
-                        if api_status == 'FALLBACK' and result.get('gemini_failure'):
+                        if api_status == 'FALLBACK' and result.get('groq_failure'):
                             st.warning(
-                                f"Gemini unavailable ({result.get('gemini_api_status', 'UNKNOWN')}): "
-                                f"{result['gemini_failure']}"
+                                f"Groq unavailable ({result.get('groq_api_status', 'UNKNOWN')}): "
+                                f"{result['groq_failure']}"
                             )
                         
                         if api_status not in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK']:
@@ -2865,8 +2856,8 @@ with tab3:
 
 with tab4:
     st.header("⚙️ System Settings")
-    st.info("Ensure `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` are set in your Streamlit Secrets.")
-    st.markdown("- **AI Model:** Gemini 2.5 Pro / Flash (Multimodal)")
+    st.info("Ensure `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` are set in your Streamlit Secrets.")
+    st.markdown("- **AI Model:** Llama 4 Scout / Llama 3.3 70B via Groq (Multimodal)")
     st.markdown("- **Execution:** Manual trigger only (No auto-loop)")
     st.markdown("- **Features:** SMC, BOS/CHOCH, FVG, Order Blocks, Liquidity Sweeps, DXY Correlation, Regime Filter (ADX), Multi-Strategy Confluence")
     st.markdown(f"- **Minimum Confluence Score:** {MINIMUM_CONFLUENCE_SCORE}/100")
