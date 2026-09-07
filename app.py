@@ -47,7 +47,7 @@ GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MIN_REQUEST_INTERVAL = 3
 GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
 GROQ_ESTIMATED_RESPONSE_TOKENS = 2000
-GROQ_MODELS = ['meta-llama/llama-4-scout-17b-16e-instruct', 'llama-3.3-70b-versatile']
+GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
@@ -2085,6 +2085,30 @@ def is_groq_rate_limited():
     retry_until = st.session_state.get('groq_rate_limit_until')
     return retry_until is not None and datetime.now() < retry_until
 
+def get_groq_models(api_key):
+    try:
+        response = requests.get(
+            f"{GROQ_API_URL.rsplit('/chat/completions', 1)[0]}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=20
+        )
+        if response.status_code != 200:
+            print(f"⚠️ Groq model discovery failed: HTTP {response.status_code}")
+            return GROQ_MODELS
+        payload = response.json()
+        available = [item.get('id') for item in payload.get('data', []) if item.get('id')]
+        preferred = [model for model in GROQ_MODELS if model in available]
+        additional = [
+            model for model in available
+            if model not in preferred
+            and not any(blocked in model.lower() for blocked in ('whisper', 'guard', 'safety', 'tts', 'distil'))
+        ]
+        models = preferred + additional
+        return models or GROQ_MODELS
+    except Exception as exc:
+        print(f"⚠️ Groq model discovery exception: {exc}")
+        return GROQ_MODELS
+
 def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None, image_mime_type='image/png'):
     api_key = get_secret("GROQ_API_KEY", "").strip()
     if not api_key:
@@ -2126,7 +2150,8 @@ def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estim
 
     request_started = False
     model_errors = []
-    for model in GROQ_MODELS:
+    models = get_groq_models(api_key)
+    for model in models:
         try:
             # Rate limit checks
             if is_groq_rate_limited():
@@ -2252,7 +2277,7 @@ def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estim
         except Exception as e:
             print(f"❌ Exception calling {model}: {str(e)}")
             model_errors.append(f"{model}: {str(e)}")
-            if model == GROQ_MODELS[-1]:
+            if model == models[-1]:
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": f"Error: {str(e)}", "model_used": "None",
                         "api_status": "EXCEPTION", "estimated_tokens": estimated_tokens}
