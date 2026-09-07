@@ -163,7 +163,7 @@ def _build_dataframe_from_records(records):
     return df.dropna()
 
 def fetch_candles_from_bitfinex(symbol, interval, limit=200):
-    pair_map = {'BTCUSD': 'tBTCUSD', 'XAUUSD': 'tXAUUSD', 'EURUSD': 'tEURUSD', 'DXY': None}
+    pair_map = {'BTCUSD': 'tBTCUSD', 'XAUUSD': 'tXAUT:USD', 'EURUSD': 'tEURUSD', 'DXY': None}
     bitfinex_symbol = pair_map.get(symbol)
     if not bitfinex_symbol:
         return pd.DataFrame()
@@ -2044,9 +2044,84 @@ def build_validation_detail(analysis, swings, current_price, symbol, pair_config
 def get_live_market_snapshot(symbol, yf_symbol, fallback_df=None):
     fallback_price = None
     if fallback_df is not None and not fallback_df.empty:
-        fallback_price = float(fallback_df['Close'].iloc[-1])
-    price = fallback_price
-    return {'symbol': symbol, 'price': price, 'source': 'fallback'}
+        try:
+            fallback_price = float(pd.to_numeric(fallback_df['Close'], errors='coerce').dropna().iloc[-1])
+        except Exception:
+            fallback_price = None
+    bitfinex_symbols = {'XAUUSD': 'tXAUT:USD'}
+    bitfinex_symbol = bitfinex_symbols.get(symbol)
+    if bitfinex_symbol:
+        try:
+            response = requests.get(
+                f'https://api-pub.bitfinex.com/v2/ticker/{bitfinex_symbol}',
+                timeout=10
+            )
+            response.raise_for_status()
+            payload = response.json()
+            price = float(payload[6])
+            if price > 0:
+                return {
+                    'symbol': symbol,
+                    'price': price,
+                    'source': 'bitfinex_spot_quote',
+                    'quote_time': datetime.now(timezone.utc).isoformat()
+                }
+        except Exception as exc:
+            print(f"⚠️ Bitfinex spot quote failed for {symbol}: {exc}")
+    try:
+        response = requests.get(
+            f'https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}',
+            params={'range': '1d', 'interval': '1m', 'includePrePost': 'true'},
+            timeout=10,
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        response.raise_for_status()
+        chart = response.json().get('chart', {})
+        result = (chart.get('result') or [{}])[0]
+        meta = result.get('meta') or {}
+        quote_candidates = [
+            meta.get('regularMarketPrice'),
+            meta.get('postMarketPrice'),
+            meta.get('preMarketPrice')
+        ]
+        for candidate in quote_candidates:
+            try:
+                price = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                return {
+                    'symbol': symbol,
+                    'price': price,
+                    'source': 'yahoo_chart_quote',
+                    'quote_time': meta.get('regularMarketTime')
+                }
+    except Exception as exc:
+        print(f"⚠️ Live quote fetch failed for {symbol}: {exc}")
+    return {'symbol': symbol, 'price': fallback_price, 'source': 'candle_close_fallback'}
+
+def refresh_symbol_data_if_stale(symbol, yf_symbol, market_snapshot, data):
+    m10 = data.get('M10') if isinstance(data, dict) else None
+    live_price = market_snapshot.get('price') if isinstance(market_snapshot, dict) else None
+    if m10 is None or m10.empty or live_price is None:
+        return data
+    try:
+        candle_price = float(pd.to_numeric(m10['Close'], errors='coerce').dropna().iloc[-1])
+        live_price = float(live_price)
+        discrepancy = abs(live_price - candle_price) / live_price
+        atr = calculate_atr(m10) or live_price * 0.002
+        materially_stale = discrepancy > 0.005 or abs(live_price - candle_price) > atr * 2.5
+        if not materially_stale:
+            return data
+        fetch_ohlcv.clear()
+        refreshed = fetch_symbol_data(symbol, yf_symbol)
+        refreshed_m10 = refreshed.get('M10') if isinstance(refreshed, dict) else None
+        if refreshed_m10 is not None and not refreshed_m10.empty:
+            print(f"🔄 Refreshed stale {symbol} candles: close={candle_price:.5f}, live={live_price:.5f}")
+            return refreshed
+    except Exception as exc:
+        print(f"⚠️ Stale-data refresh failed for {symbol}: {exc}")
+    return data
 
 def update_market_state(new_state):
     if not new_state:
@@ -2498,6 +2573,18 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
         live_snapshot = get_live_market_snapshot(symbol, YFINANCE_MAP.get(symbol, symbol), fallback_df=m10)
         if m10.empty:
             return {"error": f"Failed to fetch market data for {symbol}. Yahoo Finance may be temporarily rate-limiting your IP. Please wait a few minutes and try again."}
+
+        refreshed_data = refresh_symbol_data_if_stale(
+            symbol, YFINANCE_MAP.get(symbol, symbol), live_snapshot, data
+        )
+        if refreshed_data is not data:
+            data = refreshed_data
+            all_data[symbol] = data
+            m10 = data.get('M10', pd.DataFrame())
+            h1 = data.get('H1', pd.DataFrame())
+            h4 = data.get('H4', pd.DataFrame())
+            if m10.empty:
+                return {"error": f"Fresh market data was unavailable for {symbol}. Please try again."}
             
         micro = calculate_microstructure(m10)
         current_price = live_snapshot.get('price') or float(m10['Close'].iloc[-1])
@@ -2571,7 +2658,7 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
         h4_summary = f"Latest H4 close: {h4['Close'].iloc[-1]:.2f}" if not h4.empty else "H4 data unavailable"
         htf_summary = f"H1: {h1_summary} | H4: {h4_summary}"
         
-        prompt_data = f"Symbol: {symbol} | Live Price: {current_price} | Swing Highs: {swings['recent_swing_highs']} | Swing Lows: {swings['recent_swing_lows']} | Market Phase: {phase_context['phase']} | Phase Reason: {phase_context['reason']} | Setup Type: {setup_context['setup_type']} | Entry Timing: {setup_context['entry_timing']} | Entry Quality: {phase_context['entry_quality']} | Entry Rule: use a price-near entry and do not chase a distant level."
+        prompt_data = f"Symbol: {symbol} | Live Price: {current_price} | Live Price Source: {live_snapshot.get('source')} | Quote Time: {live_snapshot.get('quote_time', 'N/A')} | Swing Highs: {swings['recent_swing_highs']} | Swing Lows: {swings['recent_swing_lows']} | Market Phase: {phase_context['phase']} | Phase Reason: {phase_context['reason']} | Setup Type: {setup_context['setup_type']} | Entry Timing: {setup_context['entry_timing']} | Entry Quality: {phase_context['entry_quality']} | Entry Rule: use a price-near entry and do not chase a distant level."
         prompt_micro = f"VWAP: {micro.get('vwap', 'N/A')} | Price vs VWAP: {micro.get('price_vs_vwap', 'N/A')} | RVOL: {micro.get('rvol', 'N/A')} ({micro.get('volume_anomaly', 'N/A')})"
         structural_score_context = f"Python structural score: {structural_context['structural_score']}/100 | Basis: {structural_context['score_reason']}"
         historical_context = build_historical_context(m10)
