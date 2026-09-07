@@ -46,7 +46,7 @@ MINIMUM_CONFLUENCE_SCORE = 72
 GEMINI_MIN_REQUEST_INTERVAL = 3
 GEMINI_TOKEN_LIMIT_PER_MINUTE = 1000000  # Increased to prevent false limits
 GEMINI_ESTIMATED_RESPONSE_TOKENS = 2000
-GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro']
+GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-3.1-pro-preview']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
