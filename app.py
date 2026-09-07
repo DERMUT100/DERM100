@@ -2209,7 +2209,12 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
                         "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens}
 
-            content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            response_parts = candidates[0].get("content", {}).get("parts", [])
+            content = "\n".join(
+                part.get("text", "")
+                for part in response_parts
+                if isinstance(part, dict) and part.get("text")
+            ).strip()
             print(f"✅ Got response from {model} | Tokens: {total_tokens}")
 
             # Clean markdown
@@ -2233,14 +2238,14 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
                         print(f"❌ JSON parse failed. Raw: {content[:200]}")
                         return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                                 "rejection_reason": "PARSE_ERROR",
-                                "raw_output": content[:500], "model_used": model,
+                                "raw_output": content[:2000], "model_used": model,
                                 "api_status": "PARSE_ERROR",
                                 "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
                                 "completion_tokens": completion_tokens}
                 else:
                     return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                             "rejection_reason": "PARSE_ERROR",
-                            "raw_output": content[:500], "model_used": model,
+                            "raw_output": content[:2000], "model_used": model,
                             "api_status": "PARSE_ERROR",
                             "total_tokens": total_tokens}
 
@@ -2582,7 +2587,7 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         estimated_tokens = estimate_analysis_tokens(build_market_analysis_prompt(), user_content)
         
         # 🚀 CALL AI FIRST
-        analysis = call_gpt(build_market_analysis_prompt(), user_content, max_tokens=2000, estimated_tokens=estimated_tokens, image_b64=image_b64)
+        analysis = call_gpt(build_market_analysis_prompt(), user_content, max_tokens=4000, estimated_tokens=estimated_tokens, image_b64=image_b64)
         
         _post_ai_snapshot = get_live_market_snapshot(symbol, YFINANCE_MAP.get(symbol, symbol), fallback_df=m10)
         if _post_ai_snapshot.get("price"):
@@ -2603,6 +2608,7 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
             gemini_failure = analysis.get('rejection_reason', 'Unknown API Error')
             gemini_status = analysis.get('api_status', 'UNKNOWN')
             gemini_model = analysis.get('model_used', 'None')
+            gemini_raw_output = analysis.get('raw_output', '')
             gemini_tokens = {
                 key: analysis.get(key, 0)
                 for key in ('total_tokens', 'prompt_tokens', 'completion_tokens')
@@ -2613,6 +2619,8 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
             analysis['gemini_api_status'] = gemini_status
             analysis['gemini_model'] = gemini_model
             analysis.update(gemini_tokens)
+            if gemini_raw_output:
+                analysis['gemini_raw_output'] = gemini_raw_output
             analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
             
         # 🚨 FORCE BUY/SELL (No WAIT allowed from AI)
