@@ -2649,18 +2649,6 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
                 analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI attempted to WAIT, forced to {analysis['signal']} based on microstructure momentum)."
             analysis['confidence'] = 'LOW'
             
-        if setup_context['setup_type'] == 'exhaustion':
-            analysis['signal'] = 'WAIT'
-            analysis['confidence'] = 'LOW'
-            analysis['confluence_score'] = min(analysis.get('confluence_score', 0), MINIMUM_CONFLUENCE_SCORE)
-            analysis['rejection_reason'] = 'Exhaustion is already visible, so the market is too extended to justify forcing a fresh trade into the move.'
-            
-        if setup_context['entry_timing'] == 'late':
-            analysis['signal'] = 'WAIT'
-            analysis['confidence'] = 'LOW'
-            analysis['confluence_score'] = min(analysis.get('confluence_score', 0), MINIMUM_CONFLUENCE_SCORE)
-            analysis['rejection_reason'] = 'The entry is already late, the move is in progress, and the structure is no longer offering a clean early re-entry opportunity.'
-            
         analysis = apply_htf_trend_guard(analysis, symbol, htf_context)
         
         ai_score = int(round(analysis.get('confluence_score', 0)))
@@ -2787,7 +2775,7 @@ with tab1:
                             continue
                         
                         combined_score = result.get('confluence_score', 0)
-                        if combined_score >= MINIMUM_CONFLUENCE_SCORE and result.get('confidence') in ['HIGH', 'MEDIUM', 'LOW']:
+                        if result.get('signal') in ('BUY', 'SELL') and result.get('confidence') in ['HIGH', 'MEDIUM', 'LOW']:
                             sig_color = "🟢" if result.get('signal') == "BUY" else "🔴"
                             st.markdown(f"### {sig_color} **NEW SIGNAL:** {result.get('symbol', symbol)} - {result.get('signal')}")
                             st.write(f"**DXY Correlation:** {result.get('dxy_correlation', 'N/A')}")
