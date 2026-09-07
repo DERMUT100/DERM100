@@ -2171,13 +2171,14 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 
             if res.status_code == 429:
                 retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
+                error_text = res.text[:500]
                 print(f"⏳ 429 Rate limit. Retry after {retry_after}s")
-                if model == GEMINI_MODELS[-1]:
-                    st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
-                    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                            "rejection_reason": "RATE_LIMIT", "model_used": model,
-                            "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429"}
-                continue
+                model_errors.append(f"{model}: HTTP 429 {error_text}")
+                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                    "rejection_reason": f"RATE_LIMIT: {error_text}", "model_used": model,
+                    "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429",
+                    "raw_output": error_text}
 
             if res.status_code == 404:
                 print(f"❌ Model {model} returned 404. Trying next model...")
@@ -2249,6 +2250,9 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
             result['prompt_tokens'] = prompt_tokens
             result['completion_tokens'] = completion_tokens
             result['api_status'] = 'SUCCESS'
+            st.session_state.gpt_tokens_used += total_tokens
+            st.session_state.gpt_rate_limit_until = None
+            st.session_state.gpt_rate_limit_reason = ''
             return result
 
         except requests.exceptions.Timeout:
