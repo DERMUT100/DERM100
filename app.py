@@ -1363,7 +1363,8 @@ def build_candidate_levels(symbol, current_price, swings, order_blocks, fvgs, at
             order_blocks=order_blocks,
             fvgs=fvgs,
             atr=atr,
-            pair_config=pair_config
+            pair_config=pair_config,
+            market_df=None
         )
         if market_plan:
             market_plan['plan'] = 'MARKET'
@@ -1371,7 +1372,38 @@ def build_candidate_levels(symbol, current_price, swings, order_blocks, fvgs, at
             plans.append(market_plan)
     return plans
 
-def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks, fvgs, atr, pair_config):
+def build_exhaustion_target(signal, entry, df, swings, order_blocks, fvgs, atr, pair_config):
+    try:
+        entry = float(entry)
+        atr = float(atr or entry * float(pair_config.get('min_dist_pct', 0.0015)))
+    except Exception:
+        return None
+    candidates = []
+    if df is not None and not df.empty:
+        look = df.tail(60)
+        if signal == 'BUY':
+            candidates.append(float(look['High'].max()))
+        else:
+            candidates.append(float(look['Low'].min()))
+    highs = [float(x) for x in (swings or {}).get('recent_swing_highs', []) if x]
+    lows = [float(x) for x in (swings or {}).get('recent_swing_lows', []) if x]
+    if signal == 'BUY':
+        candidates.extend(x for x in highs if x > entry)
+        candidates.extend(float(ob.get('price')) for ob in (order_blocks or [])
+                          if ob.get('type') == 'BEARISH_OB' and float(ob.get('price', 0) or 0) > entry)
+        candidates.extend(float(fvg.get('top')) for fvg in (fvgs or [])
+                          if fvg.get('type') == 'BEARISH_FVG' and float(fvg.get('top', 0) or 0) > entry)
+        candidates = [x for x in candidates if x > entry + atr * 0.35]
+        return min(candidates) if candidates else entry + atr * float(pair_config.get('target_rr', 2.0))
+    candidates.extend(x for x in lows if x < entry)
+    candidates.extend(float(ob.get('price')) for ob in (order_blocks or [])
+                      if ob.get('type') == 'BULLISH_OB' and float(ob.get('price', 0) or 0) < entry)
+    candidates.extend(float(fvg.get('bottom')) for fvg in (fvgs or [])
+                      if fvg.get('type') == 'BULLISH_FVG' and float(fvg.get('bottom', 0) or 0) < entry)
+    candidates = [x for x in candidates if x < entry - atr * 0.35]
+    return max(candidates) if candidates else entry - atr * float(pair_config.get('target_rr', 2.0))
+
+def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks, fvgs, atr, pair_config, market_df=None):
     try:
         entry = float(entry)
         current_price = float(current_price)
@@ -1398,6 +1430,7 @@ def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks,
     max_stop_price = abs(entry) * float(pair_config.get('max_risk_pct', 0.008))
     max_stop_distance = min(max_stop_price, atr * float(pair_config.get('max_stop_atr', 3.0)))
     sl_anchor, tp_anchor = get_structural_anchors(signal, entry, swings, order_blocks, fvgs)
+    exhaustion_target = build_exhaustion_target(signal, entry, market_df, swings, order_blocks, fvgs, atr, pair_config)
     target_rr = float(pair_config.get('target_rr', 2.0))
     min_rr = float(pair_config.get('min_rr', 1.3))
     max_rr = float(pair_config.get('max_rr', 3.0))
@@ -1415,7 +1448,7 @@ def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks,
             risk = max_stop_distance
         if risk <= 0:
             return None
-        structure_target = (tp_anchor - tp_buffer) if tp_anchor is not None else None
+        structure_target = exhaustion_target - tp_buffer if exhaustion_target is not None else None
         tp = None
         if structure_target is not None and structure_target > entry:
             srr = (structure_target - entry) / risk
@@ -1431,6 +1464,7 @@ def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks,
             'entry': round_price(entry, pair_config),
             'stop_loss': round_price(sl, pair_config),
             'take_profit': [round_price(tp, pair_config)],
+            'exhaustion_target': round_price(tp, pair_config),
             'rr_ratio': rr,
             'risk_band': round_price(risk, pair_config),
             'order_type': order_type,
@@ -1450,7 +1484,7 @@ def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks,
             risk = max_stop_distance
         if risk <= 0:
             return None
-        structure_target = (tp_anchor + tp_buffer) if tp_anchor is not None else None
+        structure_target = exhaustion_target + tp_buffer if exhaustion_target is not None else None
         tp = None
         if structure_target is not None and structure_target < entry:
             srr = (entry - structure_target) / risk
@@ -1466,6 +1500,7 @@ def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks,
             'entry': round_price(entry, pair_config),
             'stop_loss': round_price(sl, pair_config),
             'take_profit': [round_price(tp, pair_config)],
+            'exhaustion_target': round_price(tp, pair_config),
             'rr_ratio': rr,
             'risk_band': round_price(risk, pair_config),
             'order_type': order_type,
@@ -1644,7 +1679,7 @@ def check_level_math(signal, order_type, entry, sl, tp, current_price, atr, pair
         return False, f"RR too high / TP too far from entry. RR={rr:.2f}, max={max_rr:.2f}."
     return True, "Valid"
 
-def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, fvgs, atr, pair_config):
+def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, fvgs, atr, pair_config, market_df=None):
     if not isinstance(analysis, dict):
         return analysis
     signal = analysis.get('signal')
@@ -1674,6 +1709,23 @@ def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, f
     requested_order_type = str(analysis.get('order_type') or '').upper()
     if requested_order_type not in ('MARKET', 'LIMIT', 'STOP') or requested_order_type != inferred_order_type:
         analysis['order_type'] = inferred_order_type
+    canonical_plan = build_structural_plan_v2(
+        signal=signal,
+        entry=entry,
+        current_price=current_price,
+        swings=swings,
+        order_blocks=order_blocks,
+        fvgs=fvgs,
+        atr=atr,
+        pair_config=pair_config,
+        market_df=market_df
+    )
+    if canonical_plan:
+        analysis['stop_loss'] = canonical_plan['stop_loss']
+        analysis['take_profit'] = canonical_plan['take_profit']
+        analysis['exhaustion_target'] = canonical_plan['exhaustion_target']
+        analysis['levels_source'] = 'PYTHON_EXHAUSTION_TARGET'
+        add_python_validation_note(analysis, "TP is the nearest executable exhaustion/liquidity target; SL is beyond the structural invalidation with ATR buffering.")
     analysis['entry'] = round_price(entry, pair_config)
     sl = analysis.get('stop_loss')
     tp_list = analysis.get('take_profit', [])
@@ -1697,7 +1749,8 @@ def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, f
             order_blocks=order_blocks,
             fvgs=fvgs,
             atr=atr,
-            pair_config=pair_config
+            pair_config=pair_config,
+            market_df=market_df
         )
         if not plan:
             analysis['signal'] = 'WAIT'
@@ -1741,6 +1794,7 @@ def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, f
         risk = sl_f - entry_f
         reward = entry_f - tp_f
     analysis['rr_ratio'] = round(reward / risk, 2) if risk > 0 else 0
+    analysis['exhaustion_target'] = analysis.get('exhaustion_target', analysis.get('take_profit', [None])[0])
     analysis['risk_band'] = round_price(risk, pair_config)
     analysis.setdefault('levels_source', 'HYBRID')
     return analysis
@@ -2517,7 +2571,7 @@ DECISION RULES:
 6. Describe bullish and bearish evidence separately; signal must match the stronger side.
 7. Use DXY as a macro filter for XAUUSD, EURUSD and BTCUSD. Contradiction reduces confidence but does not automatically reverse direction.
 8. Choose MARKET, LIMIT or STOP correctly: BUY LIMIT below/BUY STOP above market; SELL LIMIT above/SELL STOP below market.
-9. Put SL beyond a clear invalidation and TP at the next structural/liquidity target. Use ATR, minimum 1.5 R:R, and supplied price precision.
+9. Set an exhaustion_target at the most realistic opposing range/liquidity extreme that the move can reach before stalling. Use it as TP. Put SL beyond clear invalidation with ATR room; never guarantee a target, and reject levels that violate minimum 1.5 R:R or maximum risk.
 10. Keep all numbers identical across entry, stop_loss, take_profit and order_description.
 11. If the screenshot is usable, identify visible support, resistance, liquidity, trendlines and patterns in visual_levels; otherwise say unavailable.
 12. Be concise but specific: reasoning must mention HTF bias, key evidence, macro, momentum/volume, entry anchor, invalidation, target and risk. Complete valid JSON before adding detail.
@@ -2543,15 +2597,16 @@ OUTPUT STRICT JSON ONLY (NO MARKDOWN, NO CODE FENCES):
 "entry": 0.00,
 "stop_loss": 0.00,
 "take_profit": [0.00, 0.00],
+"exhaustion_target": 0.00,
 "rr_ratio": 0.00,
 "order_type": "MARKET|LIMIT|STOP",
 "entry_anchor": "demand zone / swing low / FVG / VWAP / session low",
 "stop_anchor": "swing low / OB low / FVG bottom / invalidation level",
-"tp_anchor": "swing high / supply zone / FVG top / session high",
+"tp_anchor": "exhaustion range extreme / swing high / supply zone / FVG top / session high",
 "order_expiry": "until next H1 close / until structure invalidates / GTC",
 "order_description": "Execution plan using SAME numbers as entry/stop_loss/take_profit.",
 "confluence_breakdown": "Weighting behind score: DXY, RSI, VWAP, RVOL, structure, premium/discount, market phase.",
-"reasoning": "Concise pair-specific analysis covering HTF structure, strongest evidence, RSI/divergence, DXY, VWAP/RVOL, entry anchor, invalidation and target.",
+"reasoning": "Concise pair-specific analysis covering HTF structure, strongest evidence, RSI/divergence, DXY, VWAP/RVOL, entry anchor, invalidation, exhaustion target and risk.",
 "rejection_reason": ""
 }}"""
 
@@ -2760,7 +2815,8 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
         
         analysis = finalize_trade_plan(
             analysis=analysis, symbol=symbol, current_price=current_price, swings=swings,
-            order_blocks=order_blocks, fvgs=fvgs, atr=setup_context.get('atr'), pair_config=pair_config
+            order_blocks=order_blocks, fvgs=fvgs, atr=setup_context.get('atr'),
+            pair_config=pair_config, market_df=m10
         )
         
         if analysis.get('signal') in ('BUY', 'SELL') and analysis.get('take_profit'):
