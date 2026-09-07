@@ -46,7 +46,8 @@ MINIMUM_CONFLUENCE_SCORE = 72
 GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MIN_REQUEST_INTERVAL = 3
 GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
-GROQ_ESTIMATED_RESPONSE_TOKENS = 2000
+GROQ_MAX_OUTPUT_TOKENS = 850
+GROQ_ESTIMATED_RESPONSE_TOKENS = GROQ_MAX_OUTPUT_TOKENS
 GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
@@ -2109,7 +2110,7 @@ def get_groq_models(api_key):
         print(f"⚠️ Groq model discovery exception: {exc}")
         return GROQ_MODELS
 
-def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None, image_mime_type='image/png'):
+def call_groq(system_prompt, user_content, max_tokens=GROQ_MAX_OUTPUT_TOKENS, retry_count=0, estimated_tokens=None, image_b64=None, image_mime_type='image/png'):
     api_key = get_secret("GROQ_API_KEY", "").strip()
     if not api_key:
         print("❌ GROQ_API_KEY is missing from st.secrets!")
@@ -2176,7 +2177,7 @@ def call_groq(system_prompt, user_content, max_tokens=4000, retry_count=0, estim
                 "model": model,
                 "messages": [{"role": "user", "content": parts}],
                 "temperature": 0.2,
-                "max_tokens": max_tokens,
+                "max_tokens": min(int(max_tokens), GROQ_MAX_OUTPUT_TOKENS),
                 "response_format": {"type": "json_object"}
             }
 
@@ -2599,7 +2600,7 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
         # 🚀 CALL AI FIRST
         analysis = call_groq(
             build_market_analysis_prompt(), user_content,
-            max_tokens=4000, estimated_tokens=estimated_tokens,
+            max_tokens=GROQ_MAX_OUTPUT_TOKENS, estimated_tokens=estimated_tokens,
             image_b64=image_b64, image_mime_type=image_mime_type
         )
         
