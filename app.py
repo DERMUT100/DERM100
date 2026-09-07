@@ -2124,6 +2124,7 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
     headers = {"Content-Type": "application/json"}
 
     request_started = False
+    model_errors = []
     for model in GEMINI_MODELS:
         try:
             # Rate limit checks
@@ -2180,11 +2181,13 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 
             if res.status_code == 404:
                 print(f"❌ Model {model} returned 404. Trying next model...")
+                model_errors.append(f"{model}: HTTP 404 {res.text[:300]}")
                 continue
 
             if res.status_code != 200:
                 error_text = res.text[:500]
                 print(f"❌ API Error {res.status_code}: {error_text}")
+                model_errors.append(f"{model}: HTTP {res.status_code} {error_text}")
                 # Try next model
                 continue
 
@@ -2250,9 +2253,11 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
 
         except requests.exceptions.Timeout:
             print(f"⏰ Timeout calling {model}")
+            model_errors.append(f"{model}: request timed out")
             continue
         except Exception as e:
             print(f"❌ Exception calling {model}: {str(e)}")
+            model_errors.append(f"{model}: {str(e)}")
             if model == GEMINI_MODELS[-1]:
                 return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
                         "rejection_reason": f"Error: {str(e)}", "model_used": "None",
@@ -2260,9 +2265,10 @@ def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estima
             continue
 
     return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-            "rejection_reason": "Error: all Gemini models failed.",
+            "rejection_reason": "Error: all Gemini models failed. " + " | ".join(model_errors[-3:]),
             "model_used": "None", "api_status": "ALL_MODELS_FAILED",
-            "estimated_tokens": estimated_tokens}
+            "estimated_tokens": estimated_tokens,
+            "raw_output": "\n".join(model_errors[-3:])}
 
 def build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=None, phase_context=None, live_price=None, htf_context=None, picture=None, firm=None, firm_notes=None, learning=None, historical_context=None):
     if not st.session_state.get("_upgrade_fallback_warned"):
