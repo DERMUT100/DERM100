@@ -46,7 +46,7 @@ MINIMUM_CONFLUENCE_SCORE = 72
 GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
 GROQ_MIN_REQUEST_INTERVAL = 3
 GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
-GROQ_MAX_OUTPUT_TOKENS = 850
+GROQ_MAX_OUTPUT_TOKENS = 950
 GROQ_ESTIMATED_RESPONSE_TOKENS = GROQ_MAX_OUTPUT_TOKENS
 GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b']
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
@@ -1669,10 +1669,7 @@ def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, f
         entry = current_price
         analysis['order_type'] = 'MARKET'
         analysis['levels_source'] = 'PYTHON'
-        analysis['reasoning'] = (
-            f"{analysis.get('reasoning', '')} "
-            "Entry was re-anchored to live price because the proposed entry was missing, invalid, or too far from market."
-        ).strip()
+        add_python_validation_note(analysis, "Entry was re-anchored to live price because the proposed entry was missing, invalid, or too far from market.")
     inferred_order_type = infer_order_type(signal, entry, current_price, pair_config, atr)
     requested_order_type = str(analysis.get('order_type') or '').upper()
     if requested_order_type not in ('MARKET', 'LIMIT', 'STOP') or requested_order_type != inferred_order_type:
@@ -1769,6 +1766,14 @@ def normalize_analysis_signals(analysis):
         analysis['candidate_direction'] = normalize_ai_signal(analysis['candidate_direction'])
     return analysis
 
+def add_python_validation_note(analysis, note):
+    if not note:
+        return analysis
+    notes = analysis.setdefault('python_validation_notes', [])
+    if note not in notes:
+        notes.append(note)
+    return analysis
+
 def validate_ai_logic(analysis):
     signal = analysis.get('signal')
     reasoning = (analysis.get('reasoning') or '').lower()
@@ -1848,14 +1853,14 @@ def apply_dxy_guardrails(analysis, symbol, dxy_context):
     if signal == expected_bias:
         analysis['dxy_correlation'] = 'CONFIRMING'
         if 'dxy' not in reasoning and 'dollar' not in reasoning:
-            analysis['reasoning'] = f"{analysis.get('reasoning', '')} DXY is confirming the directional bias because the dollar index is {trend.lower()} and price is {price_vs_vwap.lower()} VWAP."
+            add_python_validation_note(analysis, f"DXY confirms the bias: the dollar index is {trend.lower()} and price is {price_vs_vwap.lower()} VWAP.")
         return analysis
     analysis['dxy_correlation'] = 'CONTRADICTING'
     if analysis.get('confidence') == 'HIGH':
         analysis['confidence'] = 'MEDIUM'
         analysis['confluence_score'] = max(0, analysis.get('confluence_score', 0) - 4)
     if 'dxy' not in reasoning and 'dollar' not in reasoning:
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} The setup is contrarian versus the DXY bias, so it needs an explicit macro explanation to justify the trade."
+        add_python_validation_note(analysis, "The setup is contrarian versus the DXY bias and therefore needs stronger macro confirmation.")
     return analysis
 
 def apply_htf_trend_guard(analysis, symbol, htf_context):
@@ -1870,7 +1875,7 @@ def apply_htf_trend_guard(analysis, symbol, htf_context):
     if (signal == 'BUY' and expected_bias == 'BEARISH') or (signal == 'SELL' and expected_bias == 'BULLISH'):
         analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
         analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 78)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the higher-timeframe trend is {expected_bias.lower()}, so this countertrend idea carries reduced conviction and needs strong structural confirmation."
+        add_python_validation_note(analysis, f"Higher-timeframe trend is {expected_bias.lower()}, so this countertrend idea has reduced conviction and needs strong structural confirmation.")
     return analysis
 
 def cross_check_ai_evidence(analysis):
@@ -1885,11 +1890,11 @@ def cross_check_ai_evidence(analysis):
     if signal == 'BUY' and len(bear) - len(bull) >= 2:
         analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
         analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 74)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the AI's own evidence ledger was bearish-heavy, so bullish conviction was reduced."
+        add_python_validation_note(analysis, "The AI evidence ledger was bearish-heavy, so bullish conviction was reduced.")
     elif signal == 'SELL' and len(bull) - len(bear) >= 2:
         analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
         analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 74)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the AI's own evidence ledger was bullish-heavy, so bearish conviction was reduced."
+        add_python_validation_note(analysis, "The AI evidence ledger was bullish-heavy, so bearish conviction was reduced.")
     return analysis
 
 def apply_direction_correction_guard(analysis, confluence, symbol):
@@ -1905,12 +1910,12 @@ def apply_direction_correction_guard(analysis, confluence, symbol):
         analysis['confidence'] = 'MEDIUM'
         analysis['confluence_score'] = max(MINIMUM_CONFLUENCE_SCORE, min(analysis.get('confluence_score', 0), 82))
         ev = confluence.get('bullish_evidence') if direction == 'BUY' else confluence.get('bearish_evidence')
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Direction corrected to {direction} by the structural evidence audit: {'; '.join(ev[:4])}."
+        add_python_validation_note(analysis, f"Direction corrected to {direction} by the structural evidence audit: {'; '.join(ev[:4])}.")
         analysis['rejection_reason'] = None
     elif direction == signal:
         ev = confluence.get('bullish_evidence') if signal == 'BUY' else confluence.get('bearish_evidence')
         analysis['confluence_score'] = min(100, analysis.get('confluence_score', 0) + 2)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Directional evidence audit confirms the {signal} side: {'; '.join(ev[:4])}."
+        add_python_validation_note(analysis, f"Directional evidence audit confirms the {signal} side: {'; '.join(ev[:4])}.")
     return analysis
 
 def apply_conservative_signal_filter(analysis, structural_context, candles, dxy_context, current_price, swings, symbol, pair_config=None):
@@ -2197,16 +2202,12 @@ def call_groq(system_prompt, user_content, max_tokens=GROQ_MAX_OUTPUT_TOKENS, re
     if estimated_tokens is None:
         estimated_tokens = estimate_analysis_tokens(system_prompt, user_content)
 
-    # Build user text
-    user_text = ""
+    parts = [{"type": "text", "text": system_prompt}]
     for item in user_content:
         if isinstance(item, dict) and item.get("type") == "text":
-            user_text += item.get("text", "") + "\n"
+            parts.append({"type": "text", "text": item.get("text", "")})
         elif isinstance(item, str):
-            user_text += item + "\n"
-
-    # Build parts
-    parts = [{"type": "text", "text": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_text}"}]
+            parts.append({"type": "text", "text": item})
 
     # Add image if provided (but compress to save tokens)
     if image_b64:
@@ -2507,29 +2508,19 @@ MAX ENTRY DISTANCE FROM LIVE PRICE:
 PYTHON CANDIDATE EXECUTION PLANS:
 {candidate_levels}
 
-MANDATORY RULES (ALL 22):
-1. Determine market state (continuation|reversal|exhaustion|trend|coiling) from ALL data.
-2. Think like a professional trader: weigh liquidity, flow, structure, volatility, RVOL, macro, execution quality.
-3. Prioritize early, price-near entries. Never chase a large impulse.
-4. Analyze RSI on every timeframe: overbought/oversold, regular and hidden divergences, confirmation vs contradiction.
-5. Use DXY as a core macro filter for XAUUSD, EURUSD, BTCUSD.
-6. Use VWAP, RVOL, and microstructure as execution inputs.
-7. Use full structure: BOS/CHOCH, order blocks, FVGs, liquidity sweeps, swing levels, support/resistance, candle behavior.
-8. Respect premium/discount: prefer buying in discount, selling in premium. Opposite zone = lower quality.
-9. If setup looks like exhaustion or trap, reduce confidence but STILL pick BUY or SELL.
-10. Select entry close to the live price within the stated MAX ENTRY DISTANCE.
-11. SL beyond clear invalidation. TP at next major liquidity zone. Minimum 1:1.5 R:R. Size stop using ATR.
-12. Reasoning MUST show how confluence was derived from DXY, RSI, VWAP, RVOL, structure, premium/discount, volatility, market phase.
-13. Write pair-specific, execution-focused reasoning (minimum 150 words). No generic filler.
-14. Always treat the live price as the primary reference.
-15. DIRECTIONAL PROTOCOL: (a) read H4/H1 trend; (b) locate price in premium/discount; (c) which liquidity side swept; (d) RSI divergences; (e) reversal/continuation candles; (f) hierarchy: HTF trend > sweep+divergence > premium/discount > VWAP/momentum. Signal MUST equal the winning side.
-16. Never equate prior impulse with trade direction. Fall into swept low being rejected = BUY reversal. Rally into swept high rejected = SELL reversal.
-17. Fill directional_evidence with separate bullish/bearish lists. Signal MUST match heavier list unless Rule 15 overrides (explain override).
-18. BE DECISIVE: You MUST output BUY or SELL. WAIT IS STRICTLY FORBIDDEN. If uncertain, follow the H4/H1 trend direction. Never abstain.
-19. DXY contradiction lowers confidence but does not flip a direction decided by Rule 15.
-20. INTERNAL CONSISTENCY: entry, stop_loss, take_profit numbers MUST match reasoning and order_description exactly.
-21. ENTRY PROXIMITY: entry MUST be within MAX ENTRY DISTANCE of live price. If AI chooses a level, it must be anchored to a visible structural level.
-22. CHART SCREENSHOT: If an image is provided, visually identify key support/resistance, liquidity pools, trendlines, and price action patterns. Use these visual levels for Entry/SL/TP. Describe what you see in visual_levels.
+DECISION RULES:
+1. Use every supplied input: live quote, all timeframes, RSI/divergence, VWAP, RVOL, DXY, SMC structure, zones, volatility, candles and screenshot.
+2. Set market_state to continuation, reversal, exhaustion, trend or coiling. Choose BUY or SELL only; never output WAIT.
+3. Decide direction in this order: H4/H1 trend, sweep plus divergence, premium/discount, then VWAP/momentum. Explain any override.
+4. Treat the live quote as authoritative. Use the supplied Python candidate plan when suitable and keep entry within MAX ENTRY DISTANCE.
+5. Prefer BUY in discount and SELL in premium, but follow a clearly confirmed sweep/reversal when stronger.
+6. Describe bullish and bearish evidence separately; signal must match the stronger side.
+7. Use DXY as a macro filter for XAUUSD, EURUSD and BTCUSD. Contradiction reduces confidence but does not automatically reverse direction.
+8. Choose MARKET, LIMIT or STOP correctly: BUY LIMIT below/BUY STOP above market; SELL LIMIT above/SELL STOP below market.
+9. Put SL beyond a clear invalidation and TP at the next structural/liquidity target. Use ATR, minimum 1.5 R:R, and supplied price precision.
+10. Keep all numbers identical across entry, stop_loss, take_profit and order_description.
+11. If the screenshot is usable, identify visible support, resistance, liquidity, trendlines and patterns in visual_levels; otherwise say unavailable.
+12. Be concise but specific: reasoning must mention HTF bias, key evidence, macro, momentum/volume, entry anchor, invalidation, target and risk. Complete valid JSON before adding detail.
 
 ENTRY EXECUTION RULES:
 - Choose from PYTHON CANDIDATE EXECUTION PLANS when possible.
@@ -2560,7 +2551,7 @@ OUTPUT STRICT JSON ONLY (NO MARKDOWN, NO CODE FENCES):
 "order_expiry": "until next H1 close / until structure invalidates / GTC",
 "order_description": "Execution plan using SAME numbers as entry/stop_loss/take_profit.",
 "confluence_breakdown": "Weighting behind score: DXY, RSI, VWAP, RVOL, structure, premium/discount, market phase.",
-"reasoning": "Detailed institutional brief (min 150 words): HTF structure, manipulation reads, divergences, DXY, volatility, invalidation/target logic, chart visual analysis.",
+"reasoning": "Concise pair-specific analysis covering HTF structure, strongest evidence, RSI/divergence, DXY, VWAP/RVOL, entry anchor, invalidation and target.",
 "rejection_reason": ""
 }}"""
 
@@ -2682,11 +2673,11 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
             prompt_text = build_market_analysis_prompt().format(**{**all_format_kwargs, missing_key: f"[missing:{missing_key}]"})
             
         user_content = [{"type": "text", "text": prompt_text}]
-        estimated_tokens = estimate_analysis_tokens(build_market_analysis_prompt(), user_content)
+        estimated_tokens = estimate_analysis_tokens(prompt_text, [])
         
         # 🚀 CALL AI FIRST
         analysis = call_groq(
-            build_market_analysis_prompt(), user_content,
+            prompt_text, [],
             max_tokens=GROQ_MAX_OUTPUT_TOKENS, estimated_tokens=estimated_tokens,
             image_b64=image_b64, image_mime_type=image_mime_type
         )
@@ -2730,10 +2721,10 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
             firm_norm = normalize_ai_signal(firm) if firm else None
             if firm_norm:
                 analysis['signal'] = firm_norm
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI attempted to WAIT, forced to {firm_norm} based on standing desk bias)."
+                add_python_validation_note(analysis, f"AI attempted to WAIT; direction forced to {firm_norm} based on standing desk bias.")
             else:
                 analysis['signal'] = 'BUY' if micro.get('momentum') == 'BULLISH' else 'SELL'
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI attempted to WAIT, forced to {analysis['signal']} based on microstructure momentum)."
+                add_python_validation_note(analysis, f"AI attempted to WAIT; direction forced to {analysis['signal']} based on microstructure momentum.")
             analysis['confidence'] = 'LOW'
             
         analysis = apply_htf_trend_guard(analysis, symbol, htf_context)
@@ -2760,10 +2751,10 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None, image_mime_type='im
             ev = analysis.get('directional_evidence') or {}
             counter = len(ev.get('bullish', [])) if firm_norm == 'BUY' else len(ev.get('bearish', []))
             if counter >= 3:
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI overrode the standing {firm_norm} desk bias with {counter} counter-evidences.)"
+                add_python_validation_note(analysis, f"AI overrode the standing {firm_norm} desk bias with {counter} counter-evidences.")
             else:
                 analysis['signal'] = firm_norm
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" The standing {firm_norm} desk bias is maintained; the AI view was aligned to the desk bias."
+                add_python_validation_note(analysis, f"Standing {firm_norm} desk bias was maintained and the AI direction was aligned to it.")
                 
         analysis = apply_conservative_signal_filter(analysis, structural_context, candles, dxy_context, current_price, swings, symbol, pair_config=pair_config)
         
@@ -2873,7 +2864,10 @@ with tab1:
                                 st.write(f"**Order Type:** {result.get('order_type')}")
                             if result.get('order_description'):
                                 st.write(f"**Execution Plan:** {result.get('order_description')}")
-                            st.write(f"**Reasoning:** {result.get('reasoning')}")
+                            st.write(f"**AI Reasoning:** {result.get('reasoning')}")
+                            validation_notes = result.get('python_validation_notes') or []
+                            if validation_notes:
+                                st.write(f"**Python Validation Notes:** {' '.join(validation_notes)}")
                             st.markdown("---")
                             
                             st.session_state.active_signals[symbol] = {'direction': result.get('signal'), 'entry': result.get('entry', 0), 'timestamp': datetime.now(), 'score': combined_score}
