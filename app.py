@@ -48,7 +48,12 @@ GROQ_MIN_REQUEST_INTERVAL = 3
 GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
 GROQ_MAX_OUTPUT_TOKENS = 950
 GROQ_ESTIMATED_RESPONSE_TOKENS = GROQ_MAX_OUTPUT_TOKENS
-GROQ_MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b']
+GROQ_MODELS = [
+    'openai/gpt-oss-120b',  # Primary: Groq's recommended high-reasoning replacement
+    'openai/gpt-oss-20b',   # Secondary: Lighter/faster GPT OSS fallback
+    'qwen/qwen3-32b'        # Tertiary: Qwen fallback 
+]
+
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
